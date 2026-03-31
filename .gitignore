@@ -1,0 +1,19 @@
+.env
+
+
+# UV / Python Environment
+.venv/
+.uv/
+
+# Build and distribution
+dist/
+build/
+*.egg-info/
+
+# Python caching
+__pycache__/
+*.py[cod]
+
+# IDE settings (optional but recommended)
+.vscode/
+.idea/

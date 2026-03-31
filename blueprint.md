@@ -29,6 +29,7 @@ Get real-time ship data from an external system.
   - latitude / longitude
   - speed
   - timestamp
+  - what else ??
 
 **Design decision:**  
 You are NOT generating data — you are consuming it.

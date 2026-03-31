@@ -30,57 +30,8 @@ Identify regions where vessels are clustering and moving slowly outside ports.
 
 ---
 
-## 2. Vessel Route Deviation Detection
 
-### Problem
-Detect vessels that deviate significantly from typical routes.
-
-### Data Used
-- Historical trajectories (lat/lon over time)  
-- Current vessel position  
-
-### Approach
-- Build baseline routes using historical AIS data  
-- Compare live trajectory vs baseline  
-- Flag deviations beyond threshold  
-
-### Output
-- List of vessels with abnormal routes  
-- Deviation score per vessel  
-
-### Business Value
-- Identify delays and inefficiencies  
-- Detect suspicious or high-risk behavior  
-- Improve fleet monitoring  
-
----
-
-## 3. Transit Time Estimation Between Regions
-
-### Problem
-Measure actual travel time between two regions (e.g., shipping corridors).
-
-### Data Used
-- Vessel positions  
-- Timestamp  
-
-### Approach
-- Define geofenced regions  
-- Detect entry into region A and region B  
-- Compute travel duration  
-
-### Output
-- Average transit time  
-- Distribution of transit durations  
-
-### Business Value
-- Supply chain planning  
-- SLA validation  
-- Trade route benchmarking  
-
----
-
-## 4. Vessel Activity Classification (Idle vs Active)
+## 2. Vessel Activity Classification (Idle vs Active)
 
 ### Problem
 Determine how many vessels are active vs idle at any given time.
@@ -106,31 +57,8 @@ Determine how many vessels are active vs idle at any given time.
 
 ---
 
-## 5. AIS Signal Gap Detection (Anomaly Detection)
 
-### Problem
-Detect vessels that stop transmitting AIS signals unexpectedly.
-
-### Data Used
-- Timestamp  
-- MMSI (vessel ID)  
-
-### Approach
-- Track last-seen timestamp per vessel  
-- Identify gaps exceeding threshold (e.g., >30 minutes)  
-
-### Output
-- List of vessels with signal gaps  
-- Gap duration statistics  
-
-### Business Value
-- Risk and compliance monitoring  
-- Detection of suspicious behavior  
-- Data quality monitoring  
-
----
-
-## 6. Maritime Corridor Traffic Analysis
+## 3. Maritime Corridor Traffic Analysis
 
 ### Problem
 Identify the most heavily used shipping corridors.
@@ -199,3 +127,79 @@ This project demonstrates:
 - Geospatial analytics  
 - Stateful processing  
 - Business-driven data modeling  
+
+# Not in Scope
+
+## 1. Vessel Route Deviation Detection
+
+### Problem
+Detect vessels that deviate significantly from typical routes.
+
+### Data Used
+- Historical trajectories (lat/lon over time)  
+- Current vessel position  
+
+### Approach
+- Build baseline routes using historical AIS data  
+- Compare live trajectory vs baseline  
+- Flag deviations beyond threshold  
+
+### Output
+- List of vessels with abnormal routes  
+- Deviation score per vessel  
+
+### Business Value
+- Identify delays and inefficiencies  
+- Detect suspicious or high-risk behavior  
+- Improve fleet monitoring  
+
+---
+
+## 2. Transit Time Estimation Between Regions
+
+### Problem
+Measure actual travel time between two regions (e.g., shipping corridors).
+
+### Data Used
+- Vessel positions  
+- Timestamp  
+
+### Approach
+- Define geofenced regions  
+- Detect entry into region A and region B  
+- Compute travel duration  
+
+### Output
+- Average transit time  
+- Distribution of transit durations  
+
+### Business Value
+- Supply chain planning  
+- SLA validation  
+- Trade route benchmarking  
+
+---
+
+## 3. AIS Signal Gap Detection (Anomaly Detection)
+
+### Problem
+Detect vessels that stop transmitting AIS signals unexpectedly.
+
+### Data Used
+- Timestamp  
+- MMSI (vessel ID)  
+
+### Approach
+- Track last-seen timestamp per vessel  
+- Identify gaps exceeding threshold (e.g., >30 minutes)  
+
+### Output
+- List of vessels with signal gaps  
+- Gap duration statistics  
+
+### Business Value
+- Risk and compliance monitoring  
+- Detection of suspicious behavior  
+- Data quality monitoring  
+
+---
