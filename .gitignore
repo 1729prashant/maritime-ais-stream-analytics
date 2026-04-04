@@ -17,3 +17,7 @@ __pycache__/
 # IDE settings (optional but recommended)
 .vscode/
 .idea/
+
+# data files
+duckdb
+*.db
