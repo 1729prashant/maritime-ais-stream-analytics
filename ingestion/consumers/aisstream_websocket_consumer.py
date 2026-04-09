@@ -53,12 +53,12 @@ def get_duckdb_conn():
     conn = duckdb.connect(DUCKDB_PATH)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS PositionReport (
-      MMSI BIGINT, Latitude DOUBLE, Longitude DOUBLE, Timestamp TIMESTAMP, Speed DOUBLE, Course DOUBLE
+      timestamp TIMESTAMP, mmsi BIGINT, latitude DOUBLE, longitude DOUBLE, sog DOUBLE, cog DOUBLE, true_heading INTEGER, nav_status INTEGER, rot INTEGER
     );
     """)
     conn.execute("""
     CREATE TABLE IF NOT EXISTS ShipStaticData (
-      MMSI BIGINT, Name VARCHAR, IMO BIGINT, CallSign VARCHAR, VesselType VARCHAR, Length DOUBLE, Width DOUBLE
+      timestamp TIMESTAMP, mmsi BIGINT, imo_number INTEGER, call_sign VARCHAR, vessel_name VARCHAR, vessel_type INTEGER, length DOUBLE, width DOUBLE, draught DOUBLE, destination VARCHAR, eta_month INTEGER,  eta_day INTEGER,  eta_hour INTEGER,  eta_minute INTEGER
     );
     """)
     return conn
@@ -68,6 +68,7 @@ def get_bq_client():
     return client
 
 def get_sink():
+    print(f"detected database: {SINK_TYPE}")
     if SINK_TYPE == "duckdb":
         return get_duckdb_conn()
     else:
@@ -76,40 +77,80 @@ def get_sink():
 # TODO: use these or remove
 position_buffer = []
 static_buffer = []
+last_flush_time = datetime.now(timezone.utc)
+FLUSH_INTERVAL = 5  # seconds
+
 sink = get_sink()
+
 
 # TODO: use these or remove
 def flush_buffers():
-    global position_buffer, static_buffer
+    global position_buffer, static_buffer, last_flush_time
     if not position_buffer and not static_buffer:
         return
-    if SINK_TYPE == "duckdb":
-        if position_buffer:
-            df = pd.DataFrame(position_buffer)
-            sink.register("tmp_pos", df)
-            sink.execute("INSERT INTO PositionReport SELECT * FROM tmp_pos")
-        if static_buffer:
-            df = pd.DataFrame(static_buffer)
-            sink.register("tmp_static", df)
-            sink.execute("INSERT INTO ShipStaticData SELECT * FROM tmp_static")
-    else:
-        # BigQuery: use insert_rows_json or load job (implement per BQ best practice)
-        # Example: client.insert_rows_json(table_ref, position_buffer)
-        pass
-    position_buffer, static_buffer = [], []
+    try:
+        if SINK_TYPE == "duckdb":
+            if position_buffer:
+                df = pd.DataFrame(position_buffer)
+                sink.register("tmp_pos", df)
+                sink.execute("INSERT INTO PositionReport SELECT * FROM tmp_pos")
+                position_buffer.clear()
+            if static_buffer:
+                df = pd.DataFrame(static_buffer)
+                sink.register("tmp_static", df)
+                sink.execute("INSERT INTO ShipStaticData SELECT * FROM tmp_static")
+                static_buffer.clear()
+        else:
+            # BigQuery logic here
+            pass
+        last_flush_time = datetime.now(timezone.utc)
+    except Exception as e:
+        logger.error(f"Error flushing buffers: {e}", exc_info=True)
+
 
 # TODO: use these or remove
-async def handle_message(msg):
-    data = json.loads(msg)
-    if data["type"] == "PositionReport":
+async def handle_message(extracted_data, message_type):
+    
+    if message_type == "PositionReport":
         position_buffer.append({
-          "MMSI": data["mmsi"], "Latitude": data["lat"], "Longitude": data["lon"],
-          "Timestamp": data["ts"], "Speed": data["speed"], "Course": data["course"]
+            "timestamp": extracted_data['timestamp'], 
+            "mmsi": extracted_data['mmsi'], 
+            "latitude": extracted_data['latitude'], 
+            "longitude": extracted_data['longitude'],
+            "sog": extracted_data['sog'],
+            "cog": extracted_data['cog'] ,  
+            "true_heading": extracted_data['true_heading'], 
+            "nav_status":extracted_data['nav_status'],
+            "rot": extracted_data['rot']
         })
-    else:
-        static_buffer.append({...})
+    elif message_type == "ShipStaticData":
+        static_buffer.append({
+            "timestamp": extracted_data['timestamp'],
+            "mmsi" : extracted_data['mmsi'],
+            "imo_number" : extracted_data['imo_number'],
+            "call_sign" : extracted_data['call_sign'],
+            "vessel_name" : extracted_data['vessel_name'],
+            "vessel_type" : extracted_data['vessel_type'],
+            "length": extracted_data['length'],
+            "width": extracted_data['width'],
+            "draught": extracted_data['draught'],
+            "destination": extracted_data['destination'],
+            "eta_month": extracted_data["eta_month"],
+            "eta_day": extracted_data["eta_day"],
+            "eta_hour": extracted_data["eta_hour"],
+            "eta_minute": extracted_data["eta_minute"]
+        })
+
+    now = datetime.now(timezone.utc)
+
+    # Row-based flush
     if len(position_buffer) >= BATCH_SIZE or len(static_buffer) >= BATCH_SIZE:
         flush_buffers()
+
+    # Time-based flush
+    elif (now - last_flush_time).total_seconds() >= FLUSH_INTERVAL:
+        flush_buffers()
+
 
 
 # --- Logging Setup ---
@@ -141,29 +182,7 @@ def extract_ais_data(message):
             logger.debug(f"Received message of type: {message_type}") # Log message type
 
         # PositionReport
-        # An PositionReport AIS message is used to report the vessel's current position, heading, speed, and 
-        # other relevant information to other vessels and coastal authorities. This message includes the 
-        # vessel's unique MMSI (Maritime Mobile Service Identity) number, the latitude and longitude of its 
-        # current position, the vessel's course over ground (COG) and speed over ground (SOG), the type of 
-        # navigation status the vessel is in (e.g. underway using engine, anchored, etc.).
-        # Attributes
-        # MessageID Integer
-        # RepeatIndicator Integer
-        # UserID Integer
-        # Valid Boolean
-        # NavigationalStatus Integer
-        # RateOfTurn Integer
-        # Sog Double
-        # PositionAccuracy Boolean
-        # Longitude Double
-        # Latitude Double
-        # Cog Double
-        # TrueHeading Integer
-        # Timestamp Integer
-        # SpecialManoeuvreIndicator Integer
-        # Spare Integer
-        # Raim Boolean
-        # CommunicationState Integer 
+        # see ingestion/consumers/README.md
         if message_type in ['PositionReport', 'StandardClassBPositionReport']:
             report = message['Message'][message_type]
 
@@ -177,28 +196,7 @@ def extract_ais_data(message):
             extracted_data['rot'] = report.get('RateOfTurn')
 
         # ShipStaticData
-        # An ShipStaticData AIS message contains static data about the vessel, such as its name, call sign, 
-        # length, width, and type of vessel. It also includes information about the vessel's owner or operator, 
-        # as well as its place of build and its gross tonnage. This message is transmitted at regular intervals, 
-        # usually every few minutes, and is used by other vessels and coastal authorities to identify and track 
-        # the vessel. It is an important safety feature that helps to prevent collisions and improve navigation 
-        # in crowded waterways.
-        # MessageID Integer
-        # RepeatIndicator Integer
-        # UserID Integer
-        # Valid Boolean
-        # AisVersion Integer
-        # ImoNumber Integer
-        # CallSign String
-        # Name String
-        # Type Integer
-        # Dimension ShipStaticData_Dimension
-        # FixType Integer
-        # Eta ShipStaticData_Eta
-        # MaximumStaticDraught Double
-        # Destination String
-        # Dte Boolean
-        # Spare Boolean 
+        # see ingestion/consumers/README.md
         elif message_type == 'ShipStaticData':
             report = message['Message'][message_type]
 
@@ -211,7 +209,10 @@ def extract_ais_data(message):
             extracted_data['width'] = int(report.get('Dimension')["C"]) + int(report.get('Dimension')["D"])
             extracted_data['draught'] = report.get('MaximumStaticDraught')
             extracted_data['destination'] = report.get('Destination')
-            extracted_data['eta'] = report.get('ETA')
+            extracted_data['eta_month'] = report.get('ETA')["Month"]
+            extracted_data['eta_day'] = report.get('ETA')["Day"]
+            extracted_data['eta_hour'] = report.get('ETA')["Hour"]
+            extracted_data['eta_minute'] = report.get('ETA')["Minute"]
 
         else:
             logger.debug(f"Unhandled message type: {message_type}. Raw message: {json.dumps(message)}") # Log raw for unhandled
@@ -225,7 +226,7 @@ def extract_ais_data(message):
     if not extracted_data or all(value is None for key, value in extracted_data.items() if key != 'timestamp'):
         logger.debug(f"No significant data extracted. Raw message: {json.dumps(message)}")
 
-    return extracted_data
+    return extracted_data, message_type
 
 # --- WebSocket Consumer ---
 async def consume_ais_stream():
@@ -267,12 +268,16 @@ async def consume_ais_stream():
                         message = json.loads(message_json)
 
                         # Process the message
-                        extracted_data = extract_ais_data(message)
+                        extracted_data, message_type = extract_ais_data(message)
                         if extracted_data:
                             logger.info(f"Received and extracted AIS data: {extracted_data}")
                             # await asyncio.sleep(1)  # throttle processing/logging 1 second
+                            # Hand off to buffer logic
+                            await handle_message(extracted_data, message_type)
+                            
                             message_count += 1 # Increment counter
-                            if message_count >= 10000: # Check limit
+                            
+                            if message_count >= 100000: # Check limit
                                 logger.info(f"Reached {message_count} messages limit. Stopping consumer.")
                                 return # Exit the async function
                         else:
@@ -312,7 +317,8 @@ if __name__ == "__main__":
         logger.info("AISStream consumer stopped by user.")
     except Exception as e:
         logger.critical(f"Fatal error in main consumer loop: {e}", exc_info=True)
-
+    finally:
+        flush_buffers()  # persist any remaining rows before exit
 
 
 # consumer state in position report

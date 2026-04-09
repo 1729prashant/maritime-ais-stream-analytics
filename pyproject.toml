@@ -9,4 +9,6 @@ dependencies = [
     "python-dotenv",
     "pandas>=3.0.2",
     "google>=3.0.0",
+    "duckdb>=1.5.1",
+    "google-cloud-bigquery>=3.41.0",
 ]
