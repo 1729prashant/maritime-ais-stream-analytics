@@ -30,9 +30,9 @@ SINK_TYPE = os.getenv("SINK_TYPE", "duckdb")  # duckdb | bigquery
 if not SINK_TYPE:
     raise ValueError("SINK_TYPE not found in .env file or environment variables.")
 
-DUCKDB_PATH = os.getenv("SINK_TYPE", "data/ais.db")
-if not SINK_TYPE:
-    raise ValueError("SINK_TYPE not found in .env file or environment variables.")
+DUCKDB_PATH = os.getenv("DUCKDB_PATH", "ingestion/consumers/data/ais.db")
+if not DUCKDB_PATH:
+    raise ValueError("DUCKDB_PATH not found in .env file or environment variables.")
 
 BQ_PROJECT = os.getenv("BQ_PROJECT")
 if not BQ_PROJECT:
@@ -46,6 +46,13 @@ BATCH_SIZE = int(os.getenv("BATCH_SIZE", "500"))
 if not BATCH_SIZE:
     raise ValueError("BATCH_SIZE not found in .env file or environment variables.")
 
+def init_duckdb_conn():
+    conn = duckdb.connect(DUCKDB_PATH)
+    conn.execute("""DROP TABLE PositionReport;""")
+    conn.execute("""DROP TABLE ShipStaticData;""")
+    print("dropped tables PositionReport and ShipStaticData")
+
+# init_duckdb_conn()
 
 # --- Database connections ---
 # TODO: Check logic in flush_buffers
@@ -209,10 +216,10 @@ def extract_ais_data(message):
             extracted_data['width'] = int(report.get('Dimension')["C"]) + int(report.get('Dimension')["D"])
             extracted_data['draught'] = report.get('MaximumStaticDraught')
             extracted_data['destination'] = report.get('Destination')
-            extracted_data['eta_month'] = report.get('ETA')["Month"]
-            extracted_data['eta_day'] = report.get('ETA')["Day"]
-            extracted_data['eta_hour'] = report.get('ETA')["Hour"]
-            extracted_data['eta_minute'] = report.get('ETA')["Minute"]
+            extracted_data['eta_month'] = report.get('Eta')["Month"]
+            extracted_data['eta_day'] = report.get('Eta')["Day"]
+            extracted_data['eta_hour'] = report.get('Eta')["Hour"]
+            extracted_data['eta_minute'] = report.get('Eta')["Minute"]
 
         else:
             logger.debug(f"Unhandled message type: {message_type}. Raw message: {json.dumps(message)}") # Log raw for unhandled
@@ -251,8 +258,8 @@ async def consume_ais_stream():
                             [REGION_FILTER["max_lat"], REGION_FILTER["max_lon"]]
                         ]
                     ],
-                    "MessageTypes": list(range(1, 28)) # Request all standard AIS message types
-                    # "FilterMessageTypes":["PositionReport","ShipStaticData"]
+                    # "MessageTypes": list(range(1, 28)) # Request all standard AIS message types
+                    "FilterMessageTypes":["PositionReport","ShipStaticData"]
                 }
                 await websocket.send(json.dumps(subscribe_message))
                 logger.info(f"Sent subscription message with region filter: {REGION_FILTER} and all message types.")
@@ -270,7 +277,7 @@ async def consume_ais_stream():
                         # Process the message
                         extracted_data, message_type = extract_ais_data(message)
                         if extracted_data:
-                            logger.info(f"Received and extracted AIS data: {extracted_data}")
+                            logger.info(f"Received and extracted AIS data: {extracted_data}, of message type {message_type}")
                             # await asyncio.sleep(1)  # throttle processing/logging 1 second
                             # Hand off to buffer logic
                             await handle_message(extracted_data, message_type)

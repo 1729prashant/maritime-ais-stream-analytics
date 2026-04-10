@@ -11,4 +11,5 @@ dependencies = [
     "google>=3.0.0",
     "duckdb>=1.5.1",
     "google-cloud-bigquery>=3.41.0",
+    "rich>=14.3.3",
 ]
