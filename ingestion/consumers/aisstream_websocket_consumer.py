@@ -284,7 +284,7 @@ async def consume_ais_stream():
                             
                             message_count += 1 # Increment counter
                             
-                            if message_count >= 100000: # Check limit
+                            if message_count >= 10000000: # Check limit
                                 logger.info(f"Reached {message_count} messages limit. Stopping consumer.")
                                 return # Exit the async function
                         else:
