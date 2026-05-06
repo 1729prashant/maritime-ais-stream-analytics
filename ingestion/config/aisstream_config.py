@@ -37,3 +37,9 @@ REGION_FILTER = {
 
 
 DEBUG_UNKNOWN_MESSAGES = False   # Set to True only during development/troubleshooting
+
+
+# TODO or not to use 
+    # KAFKA_GROUP_ID,
+    # BATCH_SIZE,
+    # FLUSH_INTERVAL,
