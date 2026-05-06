@@ -1,223 +1,242 @@
 """
-Kafka Consumer for AIS Stream Pipeline
+storage/utils/sink.py
 
-Responsibilities:
-- Consume raw AIS JSON messages from Kafka
-- Call parser (pure function) to extract structured data
-- Buffer PositionReport and ShipStaticData separately
-- Flush buffers based on:
-    1. Batch size
-    2. Time interval
-- Delegate persistence to sink layer
+Sink Abstraction Layer for the AIS Data Pipeline.
 
-This module MUST NOT:
-- Contain parsing logic
-- Contain WebSocket logic
-- Contain sink-specific implementation details
+Provides a clean, backend-agnostic interface for persisting parsed AIS messages.
+Supports:
+    - DuckDB (local/dev)
+    - GCS Parquet (production/cloud)
+
+Key Design Principles:
+    - No parsing logic here — only accepts already extracted rows
+    - Efficient batch writes
+    - Resilient to schema drift
+    - Unique file naming to prevent collisions
+    - Explicit column contracts
 """
 
-import json
+import io
 import logging
 import time
+import uuid
 from datetime import datetime, timezone
+from typing import List, Dict, Any
 
-from kafka import KafkaConsumer
+import pandas as pd
+import duckdb
+from google.cloud import storage
 
-# Config
+# Centralized config
 from ingestion.config.aisstream_config import (
-    KAFKA_BOOTSTRAP_SERVERS,
-    KAFKA_TOPIC,
-    KAFKA_GROUP_ID,
-    BATCH_SIZE,
-    FLUSH_INTERVAL,
+    SINK_TYPE,
+    DUCKDB_PATH,
+    GCS_BUCKET,
+    GCS_PREFIX,
 )
 
-# Parser (pure function)
-from processing.utils.ais_parser import extract_ais_data
-
-# Sink abstraction
-from storage.utils.sink import get_sink
-
-
-# -------------------------------
-# Logging
-# -------------------------------
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
-# -------------------------------
-# Buffers (global, controlled)
-# -------------------------------
-position_buffer = []
-static_buffer = []
+# ----------------------------------------------------------------------
+# Column Contracts (Critical for schema stability)
+# ----------------------------------------------------------------------
+POSITION_COLUMNS = [
+    "timestamp", "mmsi", "latitude", "longitude", "sog", "cog",
+    "true_heading", "nav_status", "rot", "position_accuracy", "raim"
+]
 
-last_flush_time = datetime.now(timezone.utc)
-
-
-# -------------------------------
-# Sink Initialization
-# -------------------------------
-sink = get_sink()
-
-
-# -------------------------------
-# Flush Logic
-# -------------------------------
-def flush_buffers():
-    """
-    Flush buffered records to sink.
-
-    Delegates actual storage to sink implementation.
-    Keeps this layer storage-agnostic.
-    """
-    global position_buffer, static_buffer, last_flush_time
-
-    if not position_buffer and not static_buffer:
-        return
-
-    try:
-        logger.info(
-            f"Flushing buffers | Position: {len(position_buffer)}, Static: {len(static_buffer)}"
-        )
-
-        sink.flush(position_buffer, static_buffer)
-
-        # Clear buffers after successful flush
-        position_buffer.clear()
-        static_buffer.clear()
-
-        last_flush_time = datetime.now(timezone.utc)
-
-    except Exception as e:
-        logger.error(f"Error flushing buffers: {e}", exc_info=True)
+STATIC_COLUMNS = [
+    "timestamp", "mmsi", "imo_number", "call_sign", "vessel_name",
+    "vessel_type", "length", "width", "draught", "destination",
+    "eta_month", "eta_day", "eta_hour", "eta_minute"
+]
 
 
-# -------------------------------
-# Message Handling
-# -------------------------------
-def handle_message(extracted_data: dict, message_type: str):
-    """
-    Route parsed AIS data into appropriate buffers.
+# ----------------------------------------------------------------------
+# DuckDB Helpers
+# ----------------------------------------------------------------------
+def get_duckdb_conn() -> duckdb.DuckDBPyConnection:
+    """Create DuckDB connection and ensure schema exists."""
+    conn = duckdb.connect(DUCKDB_PATH)
 
-    Args:
-        extracted_data: Parsed AIS record (dict)
-        message_type: AIS message type
-    """
-    global position_buffer, static_buffer
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS PositionReport (
+            timestamp        TIMESTAMP,
+            mmsi             BIGINT,
+            latitude         DOUBLE,
+            longitude        DOUBLE,
+            sog              DOUBLE,
+            cog              DOUBLE,
+            true_heading     INTEGER,
+            nav_status       INTEGER,
+            rot              INTEGER,
+            position_accuracy BOOLEAN,
+            raim             BOOLEAN
+        );
+    """)
 
-    if message_type in ("PositionReport", "StandardClassBPositionReport"):
-        position_buffer.append({
-            "timestamp": extracted_data.get("timestamp"),
-            "mmsi": extracted_data.get("mmsi"),
-            "latitude": extracted_data.get("latitude"),
-            "longitude": extracted_data.get("longitude"),
-            "sog": extracted_data.get("sog"),
-            "cog": extracted_data.get("cog"),
-            "true_heading": extracted_data.get("true_heading"),
-            "nav_status": extracted_data.get("nav_status"),
-            "rot": extracted_data.get("rot"),
-        })
-
-    elif message_type == "ShipStaticData":
-        static_buffer.append({
-            "timestamp": extracted_data.get("timestamp"),
-            "mmsi": extracted_data.get("mmsi"),
-            "imo_number": extracted_data.get("imo_number"),
-            "call_sign": extracted_data.get("call_sign"),
-            "vessel_name": extracted_data.get("vessel_name"),
-            "vessel_type": extracted_data.get("vessel_type"),
-            "length": extracted_data.get("length"),
-            "width": extracted_data.get("width"),
-            "draught": extracted_data.get("draught"),
-            "destination": extracted_data.get("destination"),
-            "eta_month": extracted_data.get("eta_month"),
-            "eta_day": extracted_data.get("eta_day"),
-            "eta_hour": extracted_data.get("eta_hour"),
-            "eta_minute": extracted_data.get("eta_minute"),
-        })
-
-
-# -------------------------------
-# Flush Policy
-# -------------------------------
-def maybe_flush():
-    """
-    Decide whether buffers should be flushed based on:
-    - Batch size
-    - Time interval
-    """
-    global last_flush_time
-
-    now = datetime.now(timezone.utc)
-
-    if (
-        len(position_buffer) >= BATCH_SIZE
-        or len(static_buffer) >= BATCH_SIZE
-    ):
-        flush_buffers()
-
-    elif (now - last_flush_time).total_seconds() >= FLUSH_INTERVAL:
-        flush_buffers()
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ShipStaticData (
+            timestamp     TIMESTAMP,
+            mmsi          BIGINT,
+            imo_number    INTEGER,
+            call_sign     VARCHAR,
+            vessel_name   VARCHAR,
+            vessel_type   INTEGER,
+            length        DOUBLE,
+            width         DOUBLE,
+            draught       DOUBLE,
+            destination   VARCHAR,
+            eta_month     INTEGER,
+            eta_day       INTEGER,
+            eta_hour      INTEGER,
+            eta_minute    INTEGER
+        );
+    """)
+    return conn
 
 
-# -------------------------------
-# Kafka Consumer Loop
-# -------------------------------
-def run_consumer():
-    """
-    Main Kafka consumer loop.
+# ----------------------------------------------------------------------
+# GCS Helpers
+# ----------------------------------------------------------------------
+def get_gcs_client() -> storage.Client:
+    """Initialize GCS client using Application Default Credentials."""
+    return storage.Client()
 
-    - Reads raw JSON messages
-    - Parses via ais_parser
-    - Buffers and flushes
-    """
-    consumer = KafkaConsumer(
-        KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-        group_id=KAFKA_GROUP_ID,
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-        auto_offset_reset="earliest",
-        enable_auto_commit=True,
-    )
 
-    logger.info("Kafka consumer started...")
+# ----------------------------------------------------------------------
+# Sink Interface
+# ----------------------------------------------------------------------
+class BaseSink:
+    """Common interface for all sinks."""
 
-    message_count = 0
+    def flush(self, position_rows: List[Dict[str, Any]], static_rows: List[Dict[str, Any]]) -> None:
+        raise NotImplementedError
 
-    try:
-        for msg in consumer:
-            raw_message = msg.value
 
+# ----------------------------------------------------------------------
+# DuckDB Sink
+# ----------------------------------------------------------------------
+class DuckDBSink(BaseSink):
+    """Local DuckDB sink. Single writer recommended (DuckDB limitation)."""
+
+    def __init__(self):
+        self.conn = get_duckdb_conn()
+        logger.info(f"DuckDB sink initialized: {DUCKDB_PATH}")
+
+    def flush(self, position_rows: List[Dict[str, Any]], static_rows: List[Dict[str, Any]]) -> None:
+        """Flush with explicit column alignment to prevent schema mismatches."""
+        try:
+            if position_rows:
+                df = pd.DataFrame(position_rows)
+                df = df.reindex(columns=POSITION_COLUMNS)          # Critical: schema safety
+                self.conn.register("tmp_pos", df)
+                self.conn.execute("INSERT INTO PositionReport SELECT * FROM tmp_pos")
+                self.conn.unregister("tmp_pos")
+
+            if static_rows:
+                df = pd.DataFrame(static_rows)
+                df = df.reindex(columns=STATIC_COLUMNS)
+                self.conn.register("tmp_static", df)
+                self.conn.execute("INSERT INTO ShipStaticData SELECT * FROM tmp_static")
+                self.conn.unregister("tmp_static")
+
+            logger.info(f"Flushed {len(position_rows)} position + {len(static_rows)} static rows to DuckDB")
+
+        except Exception as e:
+            logger.error("DuckDB flush failed", exc_info=True)
+            raise
+
+
+# ----------------------------------------------------------------------
+# GCS Parquet Sink
+# ----------------------------------------------------------------------
+class GCSSink(BaseSink):
+    """GCS sink writing partitioned, compressed Parquet files."""
+
+    def __init__(self):
+        self.client = get_gcs_client()
+        self.bucket = self.client.bucket(GCS_BUCKET)
+        logger.info(f"GCS sink initialized for bucket: {GCS_BUCKET}")
+
+    def _upload_parquet(self, df: pd.DataFrame, gcs_path: str) -> None:
+        """Safely upload DataFrame as Parquet using in-memory buffer."""
+        if df.empty:
+            return
+
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False, compression='snappy')
+        buffer.seek(0)
+
+        blob = self.bucket.blob(gcs_path)
+        blob.upload_from_file(buffer, content_type="application/octet-stream")
+        logger.debug(f"Uploaded {len(df)} rows → gs://{GCS_BUCKET}/{gcs_path}")
+
+    def _get_partition_path(self, rows: List[Dict[str, Any]], table_name: str) -> str:
+        """
+        Partition by event time (AIS timestamp) when possible.
+        Falls back to ingestion time.
+        """
+        if not rows:
+            now = datetime.now(timezone.utc)
+            partition = now.strftime("%Y/%m/%d/%H")
+        else:
+            # Prefer event time from first row
+            ts = rows[0].get("timestamp")
+            if isinstance(ts, datetime):
+                partition = ts.strftime("%Y/%m/%d/%H")
+            else:
+                now = datetime.now(timezone.utc)
+                partition = now.strftime("%Y/%m/%d/%H")
+
+        filename = f"{table_name.lower()}_{uuid.uuid4().hex}.parquet"
+        return f"{GCS_PREFIX}/{table_name}/{partition}/{filename}"
+
+    def flush(self, position_rows: List[Dict[str, Any]], static_rows: List[Dict[str, Any]]) -> None:
+        """Flush with retry logic and safe Parquet handling."""
+        try:
+            if position_rows:
+                df = pd.DataFrame(position_rows)
+                df = df.reindex(columns=POSITION_COLUMNS)
+                path = self._get_partition_path(position_rows, "PositionReport")
+                self._upload_with_retry(df, path)
+
+            if static_rows:
+                df = pd.DataFrame(static_rows)
+                df = df.reindex(columns=STATIC_COLUMNS)
+                path = self._get_partition_path(static_rows, "ShipStaticData")
+                self._upload_with_retry(df, path)
+
+        except Exception as e:
+            logger.error("GCS flush failed", exc_info=True)
+            raise
+
+    def _upload_with_retry(self, df: pd.DataFrame, gcs_path: str, max_retries: int = 3) -> None:
+        """Upload with exponential backoff."""
+        for attempt in range(max_retries):
             try:
-                extracted_data, message_type = extract_ais_data(raw_message)
-
-                if extracted_data and message_type:
-                    handle_message(extracted_data, message_type)
-                    maybe_flush()
-
-                    message_count += 1
-
-                    if message_count % 10000 == 0:
-                        logger.info(f"Processed {message_count} messages")
-
-                else:
-                    logger.debug("Parser returned empty result")
-
+                self._upload_parquet(df, gcs_path)
+                return
             except Exception as e:
-                logger.error(f"Error processing message: {e}", exc_info=True)
-
-    except KeyboardInterrupt:
-        logger.info("Consumer interrupted by user")
-
-    finally:
-        logger.info("Final flush before shutdown")
-        flush_buffers()
-        consumer.close()
+                if attempt == max_retries - 1:
+                    logger.error(f"GCS upload failed after {max_retries} attempts", exc_info=True)
+                    raise
+                wait = (2 ** attempt) + 0.5
+                logger.warning(f"GCS upload failed (attempt {attempt+1}), retrying in {wait:.1f}s: {e}")
+                time.sleep(wait)
 
 
-# -------------------------------
-# Entrypoint
-# -------------------------------
-if __name__ == "__main__":
-    run_consumer()
+# ----------------------------------------------------------------------
+# Factory
+# ----------------------------------------------------------------------
+def get_sink() -> BaseSink:
+    """Return configured sink based on SINK_TYPE."""
+    if SINK_TYPE == "duckdb":
+        return DuckDBSink()
+    elif SINK_TYPE == "gcs":
+        if not GCS_BUCKET:
+            raise ValueError("GCS_BUCKET must be set when SINK_TYPE=gcs")
+        return GCSSink()
+    else:
+        raise ValueError(f"Unsupported SINK_TYPE: {SINK_TYPE}. Supported: duckdb, gcs")

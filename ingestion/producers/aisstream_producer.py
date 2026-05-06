@@ -13,7 +13,7 @@ from ingestion.config.aisstream_config import (
     AISSTREAM_API_KEY,
     AISSTREAM_WEBSOCKET_URL,
     KAFKA_CONFIG,
-    KAFKA_TOPIC_RAW_AIS,
+    KAFKA_TOPIC,
     MESSAGE_CAP
 )
 
@@ -36,71 +36,110 @@ def delivery_report(err, msg):
 async def produce_ais_stream():
     """
     Connects to AISStream WebSocket and streams raw JSON directly to Kafka.
-    Implements reconnection logic and a message cap for controlled execution.
+    Implements:
+    - Reconnection logic
+    - Backpressure handling
+    - Partition key (MMSI-based)
+    - Message cap
     """
-    # Initialize Kafka Producer
-    # Local: 'bootstrap.servers': 'localhost:9092'
+
     producer = Producer(KAFKA_CONFIG)
-    
+
     connection_attempts = 0
     total_message_count = 0
 
-    while total_message_count < MESSAGE_CAP:
-        connection_attempts += 1
-        logger.info(f"Connection attempt {connection_attempts} to {AISSTREAM_WEBSOCKET_URL}")
+    try:
+        while total_message_count < MESSAGE_CAP:
+            connection_attempts += 1
+            logger.info(f"Connection attempt {connection_attempts} to {AISSTREAM_WEBSOCKET_URL}")
 
-        try:
-            async with websockets.connect(AISSTREAM_WEBSOCKET_URL) as websocket:
-                logger.info("WebSocket Connection Established.")
+            try:
+                async with websockets.connect(AISSTREAM_WEBSOCKET_URL) as websocket:
+                    logger.info("WebSocket Connection Established.")
 
-                # Subscription payload per AISStream API specs
-                subscribe_message = {
-                    "APIKey": AISSTREAM_API_KEY,
-                    "BoundingBoxes": [
-                        [
+                    subscribe_message = {
+                        "APIKey": AISSTREAM_API_KEY,
+                        "BoundingBoxes": [[
                             [REGION_FILTER["min_lat"], REGION_FILTER["min_lon"]],
                             [REGION_FILTER["max_lat"], REGION_FILTER["max_lon"]]
-                        ]
-                    ],
-                    "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
-                }
-                
-                await websocket.send(json.dumps(subscribe_message))
-                logger.info(f"Subscription sent for region: {REGION_FILTER}")
+                        ]],
+                        "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
+                    }
 
-                while total_message_count < MESSAGE_CAP:
-                    try:
-                        # Receive raw JSON string from WebSocket
-                        raw_message = await websocket.recv()
-                        
-                        # Forward to Kafka immediately - NO PARSING
-                        # We use encode('utf-8') as Kafka expects bytes
-                        producer.produce(
-                            topic=KAFKA_TOPIC_RAW_AIS, 
-                            value=raw_message.encode('utf-8'),
-                            callback=delivery_report
-                        )
-                        
-                        # Serve delivery callbacks from previous asynchronous produces
-                        producer.poll(0)
-                        
-                        total_message_count += 1
+                    await websocket.send(json.dumps(subscribe_message))
+                    logger.info(f"Subscription sent for region: {REGION_FILTER}")
 
-                        if total_message_count % 1000 == 0:
-                            logger.info(f"Streamed {total_message_count} messages to Kafka...")
+                    while total_message_count < MESSAGE_CAP:
+                        try:
+                            raw_message = await websocket.recv()
 
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.warning("WebSocket connection closed by server. Retrying...")
-                        break 
-                    except Exception as e:
-                        logger.error(f"Error in recv loop: {e}")
-                        break
+                            # --- Extract partition key (MMSI) ---
+                            key = None
+                            try:
+                                msg_json = json.loads(raw_message)
 
-        except Exception as e:
-            logger.error(f"Failed to connect: {e}. Retrying in 10s...")
-            await asyncio.sleep(10)
+                                # Try PositionReport
+                                mmsi = (
+                                    msg_json.get("Message", {})
+                                    .get("PositionReport", {})
+                                    .get("UserID")
+                                )
 
-        # Ensure all messages are sent before a potential reconnect
+                                # Fallback to ShipStaticData
+                                if not mmsi:
+                                    mmsi = (
+                                        msg_json.get("Message", {})
+                                        .get("ShipStaticData", {})
+                                        .get("UserID")
+                                    )
+
+                                if mmsi:
+                                    key = str(mmsi)
+
+                            except Exception:
+                                # Do not fail pipeline due to malformed JSON
+                                key = None
+
+                            # --- Backpressure-safe produce ---
+                            while True:
+                                try:
+                                    producer.produce(
+                                        topic=KAFKA_TOPIC,
+                                        key=key,
+                                        value=raw_message.encode("utf-8"),
+                                        callback=delivery_report
+                                    )
+                                    break
+                                except BufferError:
+                                    # Queue full → wait for delivery reports
+                                    producer.poll(1)
+
+                            # Serve delivery callbacks
+                            producer.poll(0)
+
+                            total_message_count += 1
+
+                            if total_message_count % 1000 == 0:
+                                logger.info(f"Streamed {total_message_count} messages to Kafka...")
+
+                        except websockets.exceptions.ConnectionClosed:
+                            logger.warning("WebSocket connection closed by server. Retrying...")
+                            break
+
+                        except Exception as e:
+                            logger.error(f"Error in recv loop: {e}", exc_info=True)
+                            break
+
+            except Exception as e:
+                logger.error(f"Failed to connect: {e}. Retrying in 10s...")
+                await asyncio.sleep(10)
+
+            # Flush before reconnect
+            producer.flush()
+
+    finally:
+        # Critical: ensure no data loss on shutdown
+        logger.info("Flushing producer before shutdown...")
         producer.flush()
 
     logger.info(f"Message cap of {MESSAGE_CAP} reached. Producer shutting down.")
