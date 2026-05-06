@@ -12,4 +12,7 @@ dependencies = [
     "duckdb>=1.5.1",
     "google-cloud-bigquery>=3.41.0",
     "rich>=14.3.3",
+    "google-cloud-storage>=3.10.1",
+    "confluent-kafka>=2.14.0",
+    "pyarrow>=24.0.0",
 ]
