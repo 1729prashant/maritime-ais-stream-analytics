@@ -14,7 +14,8 @@ from ingestion.config.aisstream_config import (
     AISSTREAM_WEBSOCKET_URL,
     KAFKA_CONFIG,
     KAFKA_TOPIC,
-    MESSAGE_CAP
+    MESSAGE_CAP,
+    validate_config
 )
 
 # --- Logging Setup ---
@@ -42,7 +43,8 @@ async def produce_ais_stream():
     - Partition key (MMSI-based)
     - Message cap
     """
-
+    validate_config()
+    
     producer = Producer(KAFKA_CONFIG)
 
     connection_attempts = 0
@@ -55,7 +57,7 @@ async def produce_ais_stream():
 
             try:
                 async with websockets.connect(AISSTREAM_WEBSOCKET_URL) as websocket:
-                    logger.info("WebSocket Connection Established.")
+                    logger.info("Successfully connected to AISStream WebSocket.")
 
                     subscribe_message = {
                         "APIKey": AISSTREAM_API_KEY,
@@ -103,10 +105,16 @@ async def produce_ais_stream():
                             # --- Backpressure-safe produce ---
                             while True:
                                 try:
+                                    # Fix: Determine if we have bytes or str to avoid AttributeError
+                                    if isinstance(raw_message, str):
+                                        kafka_value = raw_message.encode('utf-8')
+                                    else:
+                                        kafka_value = raw_message # Already bytes
+
                                     producer.produce(
                                         topic=KAFKA_TOPIC,
                                         key=key,
-                                        value=raw_message.encode("utf-8"),
+                                        value=kafka_value,
                                         callback=delivery_report
                                     )
                                     break
@@ -121,6 +129,10 @@ async def produce_ais_stream():
 
                             if total_message_count % 1000 == 0:
                                 logger.info(f"Streamed {total_message_count} messages to Kafka...")
+
+                        except asyncio.CancelledError:
+                            logger.info("Producer task cancelled.")
+                            raise
 
                         except websockets.exceptions.ConnectionClosed:
                             logger.warning("WebSocket connection closed by server. Retrying...")
@@ -144,10 +156,10 @@ async def produce_ais_stream():
 
     logger.info(f"Message cap of {MESSAGE_CAP} reached. Producer shutting down.")
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(produce_ais_stream())
-    except KeyboardInterrupt:
-        logger.info("Producer stopped by user.")
-    except Exception as e:
-        logger.critical(f"Fatal error: {e}")
+# if __name__ == "__main__":
+#     try:
+#         asyncio.run(produce_ais_stream())
+#     except KeyboardInterrupt:
+#         logger.info("Producer stopped by user.")
+#     except Exception as e:
+#         logger.critical(f"Fatal error: {e}")

@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from ingestion.consumers.aisstream_websocket_consumer import consume_ais_stream
+from math import prod
+from ingestion.producers.aisstream_producer import produce_ais_stream
 
 logging.basicConfig(
     level=logging.INFO,
@@ -11,14 +12,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def main():
-    logger.info("Starting AISStream consumer...")
+
+async def main_async():
+    logger.info("Starting AISStream producer...")
     try:
-        asyncio.run(consume_ais_stream())
+        await produce_ais_stream()
     except KeyboardInterrupt:
-        logger.info("AISStream consumer stopped by user.")
+        logger.info("Producer stopped by user.")
     except Exception as e:
         logger.critical(f"Fatal error in main application loop: {e}", exc_info=True)
+    finally:
+        logger.info("Producer shut down cleanly.")
+
+
+def main():
+    asyncio.run(main_async())
+
 
 if __name__ == "__main__":
     main()

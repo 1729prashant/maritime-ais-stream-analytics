@@ -100,4 +100,4 @@ def validate_config():
 
 
 # Optional: call explicitly in entrypoints (recommended)
-# validate_config()
+validate_config()

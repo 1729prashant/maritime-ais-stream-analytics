@@ -1,0 +1,229 @@
+# -------------------------------------------------------------------
+# Docker Compose - Local Kafka Stack for AIS Streaming Pipeline
+#
+# Components:
+#   - Kafka Broker (KRaft mode, no ZooKeeper)
+#   - Kafka UI
+#   - Topic Initialization Container
+#
+# Optimized for:
+#   - Local development
+#   - AIS streaming workloads
+#   - Kafka partitioning by MMSI
+#   - Future consumer scaling
+#
+# Notes:
+#   - Single-node Kafka setup
+#   - Suitable for local/dev only
+#   - Not intended for production HA deployment
+#
+# Security Notes:
+#   - All listeners use PLAINTEXT (no TLS/SASL) - local dev only
+#   - Kafka UI has no authentication - do not expose publicly
+#   - Host port bound to 127.0.0.1 - blocks external network access
+#   - Do not deploy this compose file to a cloud VM without
+#     adding SASL + TLS and Kafka UI auth
+# -------------------------------------------------------------------
+
+volumes:
+  kafka-data:
+
+networks:
+  ais-network:
+    driver: bridge
+
+services:
+
+  # -----------------------------------------------------------------
+  # Kafka Broker (KRaft Mode)
+  # -----------------------------------------------------------------
+  broker:
+    image: apache/kafka:4.1.2
+    container_name: broker
+    hostname: broker
+
+    restart: unless-stopped
+
+    networks:
+      - ais-network
+
+    ports:
+      # Bound to 127.0.0.1 only — blocks external network access
+      - "127.0.0.1:9092:9092"
+
+    volumes:
+      # Persist Kafka logs between restarts
+      # Using /var/lib/kafka/data — semantically correct for persistent data
+      - kafka-data:/var/lib/kafka/data
+
+    environment:
+
+      # -------------------------------------------------------------
+      # KRaft Configuration
+      # -------------------------------------------------------------
+      KAFKA_NODE_ID: 1
+      KAFKA_BROKER_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+
+      # Controller quorum definition
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:29093
+
+      # Controller listener name
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+
+      # -------------------------------------------------------------
+      # Listener Configuration
+      #
+      # PLAINTEXT:
+      #   Internal Docker network communication
+      #   Used by: Spark, kafka-ui, kafka-init (containerised services)
+      #
+      # PLAINTEXT_HOST:
+      #   External host machine access
+      #   Used by: Python producer running on host
+      #
+      # CONTROLLER:
+      #   Internal KRaft controller traffic only
+      # -------------------------------------------------------------
+      KAFKA_LISTENERS: >
+        PLAINTEXT://broker:29092,
+        CONTROLLER://broker:29093,
+        PLAINTEXT_HOST://0.0.0.0:9092
+
+      KAFKA_ADVERTISED_LISTENERS: >
+        PLAINTEXT://broker:29092,
+        PLAINTEXT_HOST://127.0.0.1:9092
+
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: >
+        PLAINTEXT:PLAINTEXT,
+        PLAINTEXT_HOST:PLAINTEXT,
+        CONTROLLER:PLAINTEXT
+
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # -------------------------------------------------------------
+      # Storage / Log Configuration
+      # -------------------------------------------------------------
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # Retain messages for 24 hours locally
+      # Prevents unbounded disk growth during development
+      KAFKA_LOG_RETENTION_HOURS: 24
+
+      # -------------------------------------------------------------
+      # Single-Node Safety Settings
+      #
+      # Required for:
+      #   - idempotent producers
+      #   - transactions
+      #   - single-node local cluster
+      # -------------------------------------------------------------
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      # Faster local startup / consumer group rebalance
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+      # -------------------------------------------------------------
+      # Static Cluster ID
+      #
+      # Keeps metadata stable across restarts
+      # -------------------------------------------------------------
+      CLUSTER_ID: HtL4ZRTiTY20OmgtQzmVbA
+
+    # ---------------------------------------------------------------
+    # Healthcheck
+    #
+    # Ensures Kafka is actually ready before topic initialization
+    # and Kafka UI attempts to connect
+    # ---------------------------------------------------------------
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "/opt/kafka/bin/kafka-topics.sh",
+          "--bootstrap-server",
+          "127.0.0.1:9092",
+          "--list"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  # -----------------------------------------------------------------
+  # Kafka UI (Kafbat)
+  #
+  # Web UI for:
+  #   - Topic inspection
+  #   - Consumer groups
+  #   - Message browsing
+  #   - Partition monitoring
+  #
+  # Security Note:
+  #   No authentication configured — local dev only
+  #   Access at http://localhost:8080
+  # -----------------------------------------------------------------
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.0.0
+    container_name: kafka-ui
+
+    restart: unless-stopped
+
+    networks:
+      - ais-network
+
+    ports:
+      - "127.0.0.1:8080:8080"
+
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: broker:29092
+
+    depends_on:
+      broker:
+        condition: service_healthy
+
+  # -----------------------------------------------------------------
+  # Kafka Topic Initialization
+  #
+  # Creates required topics automatically after broker is healthy.
+  #
+  # Topic: vessels.raw
+  #   - All raw AIS message types (PositionReport + ShipStaticData)
+  #   - Single topic, message type differentiated by MessageType field
+  #   - Partitioned by MMSI key at producer layer
+  #
+  # Partitioning:
+  #   12 partitions — supports future consumer scaling and
+  #   MMSI-based partition keys
+  #
+  # Retention:
+  #   Inherits broker default of 24h
+  # -----------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:4.1.2
+    container_name: kafka-init
+
+    restart: on-failure
+
+    networks:
+      - ais-network
+
+    depends_on:
+      broker:
+        condition: service_healthy
+
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        /opt/kafka/bin/kafka-topics.sh \
+          --create \
+          --if-not-exists \
+          --bootstrap-server broker:29092 \
+          --topic vessels.raw \
+          --partitions 12 \
+          --replication-factor 1
