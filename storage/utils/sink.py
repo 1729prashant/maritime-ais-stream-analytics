@@ -112,6 +112,9 @@ class BaseSink:
     def flush(self, position_rows: List[Dict[str, Any]], static_rows: List[Dict[str, Any]]) -> None:
         """Flush batches of parsed rows to the underlying storage."""
         raise NotImplementedError("Subclasses must implement flush()")
+    
+    def close(self) -> None:
+        pass  # Base no-op
 
 
 # ----------------------------------------------------------------------
@@ -153,6 +156,10 @@ class DuckDBSink(BaseSink):
         except Exception as e:
             logger.error(f"DuckDB flush failed: {e}", exc_info=True)
             raise
+    def close(self) -> None:
+        self.conn.close()
+        logger.info("DuckDB connection closed.")
+
 
 
 # ----------------------------------------------------------------------

@@ -14,11 +14,45 @@ build/
 __pycache__/
 *.py[cod]
 
+# Test/lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # IDE settings (optional but recommended)
 .vscode/
 .idea/
 
 # data files
-duckdb
+*duckdb
 *.db
 debug.log
+*.log
+
+# macOS system files 
+.DS_Store
+
+# DuckDB WAL files
+*.wal
+
+# Streamlit secrets (if you ever add a secrets.toml for API keys/credentials)
+.streamlit/secrets.toml
+
+# GCP service account keys — relevant once wired up the GCS sink
+*-key.json
+service-account*.json
+gcp-credentials.json
+
+# dbt artifacts — relevant once warehouse/dbt/ has actual models
+warehouse/dbt/target/
+warehouse/dbt/dbt_packages/
+warehouse/dbt/logs/
+
+# Airflow local metadata (if running Airflow locally rather than Prefect)
+airflow.db
+**/airflow/logs/
+
+
+# Jupyter
+.ipynb_checkpoints/
+
