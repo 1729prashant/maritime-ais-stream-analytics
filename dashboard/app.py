@@ -28,10 +28,13 @@ import shutil
 import tempfile
 import time
 from datetime import datetime
+from datetime import timedelta
 
 import duckdb
 import pandas as pd
 import streamlit as st
+import pydeck as pdk
+
 
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "data/ais.duckdb")
 LIVE_REFRESH_SECONDS = int(os.getenv("MAP_REFRESH_SECONDS", "5"))
@@ -165,12 +168,39 @@ def render_map(df: pd.DataFrame, caption: str) -> None:
     with col1:
         st.metric("Vessels shown", len(df))
         st.caption(caption)
+
     with col2:
         if df.empty:
             st.info("No vessel positions to display.")
         else:
-            map_df = df.rename(columns={"latitude": "lat", "longitude": "lon"})
-            st.map(map_df, latitude="lat", longitude="lon", size=20)
+            map_df = df.copy()
+            map_df["lat"] = map_df["latitude"]
+            map_df["lon"] = map_df["longitude"]
+
+            # cog is the standard "direction of travel" field. AIS uses 511 as
+            # a sentinel for "not available" on true_heading — cog doesn't have
+            # this issue, so it's preferred when present.
+            map_df["heading"] = map_df["cog"].fillna(0)
+
+            layer = pdk.Layer(
+                "TextLayer",
+                data=map_df,
+                get_position=["lon", "lat"],
+                get_text='"▲"',
+                get_angle="heading",
+                get_size=20,
+                get_color=[0, 122, 255],
+                get_text_anchor='"middle"',
+                get_alignment_baseline='"center"',
+            )
+
+            view_state = pdk.ViewState(
+                latitude=map_df["lat"].mean(),
+                longitude=map_df["lon"].mean(),
+                zoom=8,
+            )
+
+            st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
 
     with st.expander("Raw data"):
         st.dataframe(df.sort_values("timestamp", ascending=False))
@@ -237,10 +267,11 @@ def run_replay_mode():
         return
 
     as_of = st.sidebar.slider(
-        "Replay time",
+        "Replay time (UTC)",
         min_value=min_ts,
         max_value=max_ts,
         value=max_ts,
+        step=timedelta(seconds=30),
         format="YYYY-MM-DD HH:mm:ss",
     )
 
