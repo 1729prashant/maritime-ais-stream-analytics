@@ -54,6 +54,10 @@ static_buffer = []
 
 last_flush_time = datetime.now(timezone.utc)
 
+# use for deduplication
+last_seen_position = {}  # mmsi -> last accepted timestamp
+DEDUP_GAP_SECONDS = 0.5  # matches the threshold derived from your gap-distribution analysis
+
 
 # -------------------------------
 # Sink Initialization
@@ -113,6 +117,23 @@ def flush_buffers():
 
 
 # -------------------------------
+# Deduplication Logic
+# -------------------------------
+def is_duplicate_position(mmsi, timestamp) -> bool:
+    """
+    Returns True if this position report arrived within DEDUP_GAP_SECONDS
+    of the last *accepted* report for this MMSI — almost certainly the same
+    real-world broadcast relayed by multiple receiving stations, not a new
+    position. See: arXiv 1601.06041 on AIS transaction-timestamp duplication.
+    """
+    last_ts = last_seen_position.get(mmsi)
+    if last_ts is None:
+        return False
+    gap = (timestamp - last_ts).total_seconds()
+    return gap < DEDUP_GAP_SECONDS
+
+
+# -------------------------------
 # Message Handling
 # -------------------------------
 def handle_message(extracted_data: dict, message_type: str):
@@ -126,6 +147,19 @@ def handle_message(extracted_data: dict, message_type: str):
     global position_buffer, static_buffer
 
     if message_type in ("PositionReport", "StandardClassBPositionReport"):
+        mmsi = extracted_data.get("mmsi")
+        ts = extracted_data.get("timestamp")
+
+        if mmsi is None or ts is None:
+            logger.debug("Dropped position with null MMSI or timestamp")
+            return
+
+        if is_duplicate_position(mmsi, ts):
+            logger.debug(f"Dropped duplicate position for MMSI {mmsi} (gap < {DEDUP_GAP_SECONDS}s)")
+            return  # do not buffer, do not update last_seen
+        
+        last_seen_position[mmsi] = ts
+
         position_buffer.append({
             "timestamp": extracted_data.get("timestamp"),
             "mmsi": extracted_data.get("mmsi"),

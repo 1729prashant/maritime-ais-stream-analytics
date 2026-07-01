@@ -27,6 +27,7 @@ import os
 import shutil
 import tempfile
 import time
+import json
 from datetime import datetime
 from datetime import timedelta
 
@@ -35,11 +36,17 @@ import pandas as pd
 import streamlit as st
 import pydeck as pdk
 
+from ingestion.config.aisstream_config import REGION_FILTER
 
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "data/ais.duckdb")
 LIVE_REFRESH_SECONDS = int(os.getenv("MAP_REFRESH_SECONDS", "5"))
 LIVE_STALE_MINUTES = int(os.getenv("MAP_STALE_MINUTES", "30"))
 REPLAY_CACHE_TTL_SECONDS = int(os.getenv("REPLAY_CACHE_TTL_SECONDS", "30"))
+
+with open("static/arrow.json") as f:
+    ICON_MAPPING = json.load(f)
+
+ICON_ATLAS = os.path.abspath("static/arrow.png")
 
 st.set_page_config(page_title="AIS Ship Tracker", layout="wide")
 
@@ -119,7 +126,7 @@ def query_latest_positions(snapshot_path: str, as_of: datetime, stale_minutes: i
             params.append(as_of)
 
         df = conn.execute(f"""
-            SELECT mmsi, latitude, longitude, timestamp, sog, cog
+            SELECT mmsi, latitude, longitude, timestamp, sog, cog, true_heading
             FROM (
                 SELECT *,
                        ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY timestamp DESC) AS rn
@@ -176,31 +183,54 @@ def render_map(df: pd.DataFrame, caption: str) -> None:
             map_df = df.copy()
             map_df["lat"] = map_df["latitude"]
             map_df["lon"] = map_df["longitude"]
+            map_df["icon"] = "arrow"
 
             # cog is the standard "direction of travel" field. AIS uses 511 as
             # a sentinel for "not available" on true_heading — cog doesn't have
             # this issue, so it's preferred when present.
-            map_df["heading"] = map_df["cog"].fillna(0)
+            map_df["heading"] = (
+                map_df["true_heading"]
+                .where(map_df["true_heading"] != 511)
+                .fillna(map_df["cog"])
+                .fillna(0)
+            )
+            map_df["heading"] += 180 # arrow png is down
 
             layer = pdk.Layer(
-                "TextLayer",
+                "IconLayer",
                 data=map_df,
+
+                get_icon="icon",
                 get_position=["lon", "lat"],
-                get_text='"▲"',
+
                 get_angle="heading",
+
+                icon_atlas=ICON_ATLAS,
+                icon_mapping=ICON_MAPPING,
+
                 get_size=20,
-                get_color=[0, 122, 255],
-                get_text_anchor='"middle"',
-                get_alignment_baseline='"center"',
+                size_scale=1,
+                size_min_pixels=20,
+
+                pickable=True,
+                get_color=[255, 0, 0],   # Red
             )
 
+
+            # Use the configured region for the initial view
             view_state = pdk.ViewState(
-                latitude=map_df["lat"].mean(),
-                longitude=map_df["lon"].mean(),
-                zoom=8,
+                latitude=(REGION_FILTER["min_lat"] + REGION_FILTER["max_lat"]) / 2,
+                longitude=(REGION_FILTER["min_lon"] + REGION_FILTER["max_lon"]) / 2,
+                zoom=3,
             )
 
-            st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
+            # restrict zoom
+            st.pydeck_chart(
+                pdk.Deck(
+                    layers=[layer],
+                    initial_view_state=view_state,
+                )
+            )
 
     with st.expander("Raw data"):
         st.dataframe(df.sort_values("timestamp", ascending=False))

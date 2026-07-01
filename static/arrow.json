@@ -1,0 +1,11 @@
+{
+  "arrow": {
+    "x": 0,
+    "y": 0,
+    "width": 240,
+    "height": 240,
+    "anchorX": 120,
+    "anchorY": 120,
+    "mask": true
+  }
+}
